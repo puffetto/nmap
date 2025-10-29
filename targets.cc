@@ -343,6 +343,7 @@ static Target *setup_target(const HostGroupState *hs,
   t = new Target();
 
   t->setTargetSockAddr(ss, sslen);
+  bool have_user_iface = (o.device != NULL && o.device[0] != '\0');
 
   /* Special handling for the resolved address (for example whatever
      scanme.nmap.org resolves to in scanme.nmap.org/24). */
@@ -356,9 +357,33 @@ static Target *setup_target(const HostGroupState *hs,
    * the scan type requires us to */
   if (o.RawScan()) {
     if (!nmap_route_dst(ss, &rnfo)) {
-      log_bogus_target(inet_ntop_ez(ss, sslen));
-      error("%s: failed to determine route to %s", __func__, t->NameIP());
-      goto bail;
+      /* If the user forced an interface (-e) and/or source (-S), proceed
+       * without a discovered route. We'll bind to that iface/src and let
+       * the kernel route/ARP. */
+      if (have_user_iface || o.sourceaddr()) {
+        memset(&rnfo, 0, sizeof(rnfo));
+        /* Fill interface info from user device */
+        if (have_user_iface && !lookup_device_info(o.device, &rnfo.ii)) {
+          /* If the named iface is unknown, fail as before */
+          log_bogus_target(inet_ntop_ez(ss, sslen));
+          error("%s: failed to use user-specified interface %s", __func__, o.device);
+          goto bail;
+        }
+        /* Source address: honor -S, else pick first addr on iface matching family */
+        if (o.sourceaddr()) {
+          rnfo.srcaddr = *o.sourceaddr();
+        } else if (!select_iface_addr_matching_family(&rnfo.ii, ss->ss_family, &rnfo.srcaddr)) {
+          log_bogus_target(inet_ntop_ez(ss, sslen));
+          error("%s: no suitable source address on %s", __func__, rnfo.ii.devname);
+          goto bail;
+        }
+        rnfo.direct_connect = false;  /* conservative default */
+        /* rnfo.nexthop left zeroed; kernel will decide */
+      } else {
+        log_bogus_target(inet_ntop_ez(ss, sslen));
+        error("%s: failed to determine route to %s", __func__, t->NameIP());
+        goto bail;
+      }
     }
     if (rnfo.direct_connect) {
       t->setDirectlyConnected(true);
